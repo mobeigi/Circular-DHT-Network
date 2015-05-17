@@ -13,43 +13,41 @@
 #! /usr/bin/python
 
 import sys
-import colors #for important number highlighting, by Jossef Harush, source: https://gist.github.com/Jossef/0ee20314577925b4027f
+import re
 import socket
 import time
 import threading
 import ctypes
 
-#Global definitions
+import curses;
+from string import printable
+
+
+#Global variables
 LOCALHOST = "127.0.0.1"
 BASE_PORT_OFFSET = 50000;
 PINGREQ_TIMEOUT = 1.0; # How long sent ping will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
 PINGBUFFER = 6;
 PINGSEND_FREQUENCY = 5.0; #How often to send a ping (seconds)
+THREADKILLTIME = 2.0; #How long to wait before terminating program (to allow thread to terminate)
+
+#Curses vars
+PRINTABLE = map(ord, printable)
+COLOR_DEFAULT = -1;
+MIN_REC_WIDTH = 110;
+
+# Enumeration type definition
+def enum(**enums):
+  return type('Enum', (), enums);
+
+# Enumns
+Ping = enum(REQ=0, RES=1);
+Colours = enum(STATUS=1, WARNING=2, COMMAND=3, RED=4, GREEN=5);
 
 
-# By Johan Dahlin, http://stackoverflow.com/questions/323972/is-there-any-way-to-kill-a-thread-in-python
-def terminate_thread(thread):
-    """Terminates a python thread from another thread.
-
-    :param thread: a threading.Thread instance
-    """
-    if not thread.isAlive():
-        return
-
-    exc = ctypes.py_object(SystemExit)
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_long(thread.ident), exc)
-    if res == 0:
-        raise ValueError("nonexistent thread id")
-    elif res > 1:
-        # """if it returns a number greater than one, you're in trouble,
-        # and you should call it again with exc=NULL to revert the effect"""
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(thread.ident, None)
-        raise SystemError("PyThreadState_SetAsyncExc failed")
-
-
-def main(argv):
+# Initilise application, check for valid arguments and initiate curses screen
+def init(argv):
 
   # Not enough arguments
   if len(sys.argv) != 4:
@@ -63,44 +61,156 @@ def main(argv):
       print >> sys.stderr, colors.error('error:'), 'provided identifier (' + sys.argv[argNum] +') in argument', argNum ,'was not an integer in [0,255] (inclusive).'
       exit(1);
 
-  #Collect all important arguments
+  #Set all important arguments
+  global myPeer, myPort, succ1, succ2;
+
   myPeer = int(sys.argv[1]);
   myPort = peerToPort(myPeer);
   succ1 = int(sys.argv[2]);
   succ2 = int(sys.argv[3]);
-  Ping = enum(REQ=0, RES=1);
+
+  curses.wrapper(main);
+
+
+# Main function
+# Attached to curse screen
+# Loops indefinately waiting for user input commands
+def main(screen):
+  Y, X = screen.getmaxyx()
+  global max_lines;
+  max_lines = (Y - 3)
+
+  screen.clear(); #clear screen
+  curses.use_default_colors(); #Use terminal default colours by default
+  curses.start_color(); # allow colours in text
+
+  # Colours pairs that will be used
+  # Strings can use colour pair N by containing: colourN[str]
+  # Where N is the pair number and str is the text to be coloured.
+  curses.init_pair(Colours.STATUS, curses.COLOR_BLUE, curses.COLOR_WHITE);
+  curses.init_pair(Colours.WARNING, curses.COLOR_RED, curses.COLOR_WHITE);
+  curses.init_pair(Colours.COMMAND, curses.COLOR_CYAN, COLOR_DEFAULT);
+  curses.init_pair(Colours.RED, curses.COLOR_RED, COLOR_DEFAULT);
+  curses.init_pair(Colours.GREEN, curses.COLOR_GREEN, COLOR_DEFAULT);
+
+  # Create global lines that will store all visible lines on screen at any given time
+  # Lines will contain tuples of command strings and message strings (ie lines acts like a 2D string array)
+  global lines;
+  lines = [];
 
   # Print message to let people know peer is joining the CDHT network
-  cprint ("[STATUS]", "Peer (" + printPeer(myPeer) + ") is attempting to join the CDHT network...");
-  cprint ("[STATUS]", "Sucessfully joined CDHT network."); #simulate fake join message
+  consolePrint (screen, "[STATUS]", "Peer (" + makeColComp(Colours.GREEN, str(myPeer)) + ") is attempting to join the CDHT network...");
+  consolePrint (screen,  "[STATUS]", "Sucessfully joined CDHT network."); #simulate fake join message
+  consolePrint (screen,  "[STATUS]", "Welcome to this CDHT network!");
+  consolePrint (screen,  "[STATUS]", "Enter valid commands at the bottom of this terminal screen. Command " + makeColComp(Colours.COMMAND, "quit") + " will exit the application.");
 
-  cprint ("[STATUS]", "Welcome to this CDHT network! (instructions should go here) ");
-  
-  tPingMonitor = threading.Thread(target=pingMonitor, args=(myPeer, myPort, succ1, succ2, Ping));
+  # Display error message if screen is too short
+  height, width = screen.getmaxyx();
+  if (width < MIN_REC_WIDTH):
+    consolePrint (screen,  "[WARNING]", makeColComp(Colours.RED, "[A minimal terminal width of 110 characters is recommended (current: " + str(width) + ")."));
+
+
+  # Start ping monitor thread
+  tPingMonitor = threading.Thread(target=pingMonitor, args=(screen, myPeer, myPort, succ1, succ2, Ping));
   tPingMonitor.start();
 
-  # Monitor stdin for commands
+  #Loop indefinately waiting for commands
   while True:
 
-    try:
-      inputCommand = str.strip(sys.stdin.readline());
+      s = prompt(screen, (Y - 1), 0);
 
-      # Check for valid input commands
-      if inputCommand.lower() == "quit" or inputCommand.lower() == "q":
+      # Quit command
+      if s == "quit":
         terminate_thread(tPingMonitor); #kill threads
-        cprint ("[STATUS]", "Leaving CDHT network and terminating program. Please wait for running threads to terminate."); #quit message
-        exit(0);
-      #Invalid command      
+        consolePrint (screen, "[STATUS]", "Leaving CDHT network and terminating program. Please wait for running threads to terminate."); #quit message
+        screen.refresh()  #Display last messages
+        time.sleep(THREADKILLTIME); #Pause to allow thread to terminate        
+        break;
+      # Unknown command
       else:
-        cprint ("[STATUS]", "Invalid command provided."); #quit message
+        consolePrint (screen, "[STATUS]", "Invalid command '" + s + "' provided.");
 
-    except IOError:
-      pass; 
+      overflowCheck(screen);
+      screen.refresh();
+
+# Check if text has overflown and adjust screen accordingly
+def overflowCheck(screen):
+  global lines;
+  global max_lines;
+  
+  if len(lines) >= max_lines:
+    lines = lines[1:];
 
 
+  # Clear all lines up to max_lines (this does not clear the command input line)
+  for i in range(0, max_lines):
+    screen.move(i, 0);
+    screen.clrtoeol();
 
-def pingMonitor(myPeer, myPort, succ1, succ2, Ping):
+  for i, line in enumerate(lines):
+      if i >= max_lines:
+        break;
+      consolePrintLine(screen, i, line[0], line[1]);
 
+
+# Fetch user input (commands)
+# By James Mills (http://stackoverflow.com/a/30259422/1800854)
+def input(screen):
+    ERASE = input.ERASE = getattr(input, "erasechar", ord(curses.erasechar()))
+    Y, X = screen.getyx();
+    s = [];
+
+    while True:
+        c = screen.getch();
+
+        if c in (13, 10):
+            break;
+        elif c == ERASE or c == curses.KEY_BACKSPACE:
+            y, x = screen.getyx();
+            if x > X:
+                del s[-1];
+                screen.move(y, (x - 1));
+                screen.clrtoeol();
+                screen.refresh();
+        elif c in PRINTABLE:
+            s.append(chr(c));
+            screen.addch(c);
+        else:
+            pass
+
+    return "".join(s)
+
+# Print input prompt on last line in curses screen
+def prompt(screen, y, x, prompt=">> "):
+    screen.move(y, x);
+    screen.clrtoeol();
+    screen.addstr(y, x, prompt);
+    return input(screen);
+
+
+# By Johan Dahlin (http://stackoverflow.com/a/15274929/1800854)
+def terminate_thread(thread):
+    """Terminates a python thread from another thread.
+
+    :param thread: a threading.Thread instance
+    """
+    if not thread.isAlive():
+        return
+
+    exc = ctypes.py_object(SystemExit);
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_long(thread.ident), exc);
+    if res == 0:
+        raise ValueError("nonexistent thread id");
+    elif res > 1:
+        # """if it returns a number greater than one, you're in trouble,
+        # and you should call it again with exc=NULL to revert the effect"""
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(thread.ident, None);
+        raise SystemError("PyThreadState_SetAsyncExc failed");
+
+
+# Ping monitor worker thread
+def pingMonitor(screen, myPeer, myPort, succ1, succ2, Ping):
   # Create socket that is to be used for listening for messages
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM);
   sock.settimeout(PINGMONITOR_TIMEOUT);
@@ -133,14 +243,12 @@ def pingMonitor(myPeer, myPort, succ1, succ2, Ping):
 
       # Check for ping request message
       if msgType == Ping.REQ:
-        cprint("[PING REQ]", "A ping request message was received from Peer " + printPeer(senderPeerID));
+        consolePrint(screen, "[PING REQ]", "A ping request message was received from Peer " + makeColComp(Colours.GREEN, str(senderPeerID)));
 
         #Send a ping response back (in response to ping request)
         sendPing(Ping.RES, myPeer, LOCALHOST, peerToPort(int(senderPeerID)));
       elif msgType == Ping.RES:
-        cprint("[PING RES]", "A ping response message was received from Peer " + printPeer(senderPeerID));
-
-      sys.stdout.flush();
+        consolePrint(screen, "[PING RES]" , "A ping response message was received from Peer " + makeColComp(Colours.GREEN, str(senderPeerID)))
     except socket.error:
       pass;
 
@@ -167,29 +275,78 @@ def sendPing(msgType, myID, targetIP, targetPort):
 def peerToPort(peerID):
   return BASE_PORT_OFFSET + peerID;
 
-#Additional print functions
+# Make colour component
+def makeColComp(colour, text):
+  return "colour" + str(colour) + "[" + text + "]";
 
-# Returns a tabular formated line with a control signal and an associated message
-def cprint(control, message):
-  formatedControl = printControl(control);
+# console print helper function
+def consolePrintLine (screen, pos, control, message):
+  # Print different colours for different control messages
+  if (control == "[WARNING]"):
+    screen.addstr(pos, 0, control, curses.color_pair(Colours.WARNING));
+  else:
+    screen.addstr(pos, 0, control, curses.color_pair(Colours.STATUS));
 
-  for i in range(0, 8 - len(control)):
-    formatedControl += " ";
+  # Print message by parsing any colour tags: colourN[str]
+  # Split messages based on colour components
+  newMes = re.split("(colour\d\[.*?\])", message);
 
-  print '{:<8} {:<8}'.format(formatedControl, message);
+  totalOut = 12; # first column offset
 
-def printPeer(peerID):
-  return printGreen(peerID);
+  for line in newMes:
 
-def printGreen(text):
-  return colors.draw(str(text), fg_green=True);
+    colMatch = re.match("colour(\d{1})\[(.*)\]", line);
 
-def printControl(text):
-  return colors.draw(text, fg_blue = True, bg_light_grey=True);
+    str = "";
+    colourPairNum = 0;
+
+    if colMatch:
+      colourPairNum = int((colMatch.groups()[0]));
+      str = colMatch.groups()[1];
+    else:
+      str = line;
+
+    # Check to ensure we dont attempt to write offscreen
+    height, width = screen.getmaxyx();
+
+    if (totalOut + len(str) >= width):
+      truncVal = width - totalOut;
+      truncStr = (str)[:truncVal]
+
+      if colMatch:
+        screen.addstr(pos, totalOut, truncStr, curses.color_pair(colourPairNum));
+      else:
+        screen.addstr(pos, totalOut, truncStr);
+
+      break;
+
+    #Print contents normally
+    if colMatch:
+      screen.addstr(pos, totalOut, str, curses.color_pair(colourPairNum));
+    else:
+      screen.addstr(pos, totalOut, str);
+  
+    totalOut += len(str);
 
 
-def enum(**enums):
-  return type('Enum', (), enums);
+# Prints a control message and info message to the given screen
+def consolePrint (screen, control, message):
 
+  global lines;
+  global max_lines;
+
+  myY, myX = screen.getyx(); #save cursor pos
+
+  # Print line
+  consolePrintLine(screen, len(lines), control, message);
+  lines.append([control, message]);
+
+  overflowCheck(screen);
+  
+  screen.move(myY, myX); #restore cursor pos
+  screen.refresh();
+
+
+# define program entry point
 if __name__ == "__main__":
-  main(sys.argv[1:])
+  init(sys.argv[1:])
