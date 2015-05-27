@@ -1,5 +1,5 @@
 #
-# COMP3331 - Socker Programming Assignment
+# COMP3331 - Socket Programming Assignment
 #
 # Circular DHT Program capable of peer churn (leave) and sending/receiving ping/file transfer signals.
 #
@@ -30,7 +30,9 @@ PINGREQ_TIMEOUT = 1.0; # How long sent ping will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
 PINGBUFFER = 6;
 PINGSEND_FREQUENCY = 5.0; #How often to send a ping (seconds)
+FILEMONITOR_TIMEOUT = 1.0;
 THREADKILLTIME = 2.0; #How long to wait before terminating program (to allow thread to terminate)
+MAXPEERNUM = 255;
 
 #Curses vars
 PRINTABLE = map(ord, printable)
@@ -43,10 +45,12 @@ def enum(**enums):
 
 # Enumns
 Ping = enum(REQ=0, RES=1);
-Colours = enum(STATUS=1, WARNING=2, COMMAND=3, RED=4, GREEN=5);
+FT = enum(REQ=0, FORWARD=1, FORWARDNEXT=2, RES=3); 
+FILECHECK = enum(NOTAVAILABLE=0, AVAILABLE=1, NEXTAVAILABLE = 2);
+Colours = enum(STATUS=1, WARNING=2, COMMAND=3, RED=4, GREEN=5, FILETRANSFER=6);
 
 
-# Initilise application, check for valid arguments and initiate curses screen
+# Initialise application, check for valid arguments and initiate curses screen
 def init(argv):
 
   # Not enough arguments
@@ -58,23 +62,23 @@ def init(argv):
   for argNum in range(1, len(sys.argv)):
     #Check for integer arguments and ensure within [0, 255] range
     if not (str.isdigit(sys.argv[argNum])) or not (0 <= int(sys.argv[argNum]) <= 255):
-      print >> sys.stderr, colors.error('error:'), 'provided identifier (' + sys.argv[argNum] +') in argument', argNum ,'was not an integer in [0,255] (inclusive).'
+      print >> sys.stderr, 'error: provided identifier (' + sys.argv[argNum] +') in argument', argNum ,'was not an integer in [0,255] (inclusive).'
       exit(1);
 
   #Set all important arguments
   global myPeer, myPort, succ1, succ2;
-
+  
   myPeer = int(sys.argv[1]);
   myPort = peerToPort(myPeer);
   succ1 = int(sys.argv[2]);
   succ2 = int(sys.argv[3]);
-
+  
   curses.wrapper(main);
 
 
 # Main function
 # Attached to curse screen
-# Loops indefinately waiting for user input commands
+# Loops indefinitely waiting for user input commands
 def main(screen):
   Y, X = screen.getmaxyx()
   global max_lines;
@@ -92,6 +96,7 @@ def main(screen):
   curses.init_pair(Colours.COMMAND, curses.COLOR_CYAN, COLOR_DEFAULT);
   curses.init_pair(Colours.RED, curses.COLOR_RED, COLOR_DEFAULT);
   curses.init_pair(Colours.GREEN, curses.COLOR_GREEN, COLOR_DEFAULT);
+  curses.init_pair(Colours.FILETRANSFER, curses.COLOR_WHITE, curses.COLOR_RED);
 
   # Create global lines that will store all visible lines on screen at any given time
   # Lines will contain tuples of command strings and message strings (ie lines acts like a 2D string array)
@@ -99,22 +104,26 @@ def main(screen):
   lines = [];
 
   # Print message to let people know peer is joining the CDHT network
-  consolePrint (screen, "[STATUS]", "Peer (" + makeColComp(Colours.GREEN, str(myPeer)) + ") is attempting to join the CDHT network...");
-  consolePrint (screen,  "[STATUS]", "Sucessfully joined CDHT network."); #simulate fake join message
+  consolePrint (screen, "[STATUS]", "Attempting to join the CDHT network as Peer (" + makeColComp(Colours.GREEN, str(myPeer)) + ")...");
+  consolePrint (screen,  "[STATUS]", "Successfully joined CDHT network."); #simulate fake join message
   consolePrint (screen,  "[STATUS]", "Welcome to this CDHT network!");
   consolePrint (screen,  "[STATUS]", "Enter valid commands at the bottom of this terminal screen. Command " + makeColComp(Colours.COMMAND, "quit") + " will exit the application.");
 
   # Display error message if screen is too short
   height, width = screen.getmaxyx();
   if (width < MIN_REC_WIDTH):
-    consolePrint (screen,  "[WARNING]", makeColComp(Colours.RED, "[A minimal terminal width of 110 characters is recommended (current: " + str(width) + ")."));
+    consolePrint (screen,  "[WARNING]", makeColComp(Colours.RED, "A minimum terminal width of " + str(MIN_REC_WIDTH) + " characters is recommended (current: " + str(width) + ")."));
 
 
   # Start ping monitor thread
   tPingMonitor = threading.Thread(target=pingMonitor, args=(screen, myPeer, myPort, succ1, succ2, Ping));
   tPingMonitor.start();
 
-  #Loop indefinately waiting for commands
+  #Start file transfer monitor thread
+  tFileMonitor = threading.Thread(target=fileMonitor, args=(screen, myPeer, myPort, succ1, succ2, Ping));
+  tFileMonitor.start();
+
+  #Loop indefinitely waiting for commands
   while True:
 
       s = prompt(screen, (Y - 1), 0);
@@ -122,10 +131,50 @@ def main(screen):
       # Quit command
       if s == "quit":
         terminate_thread(tPingMonitor); #kill threads
+        terminate_thread(tFileMonitor);
         consolePrint (screen, "[STATUS]", "Leaving CDHT network and terminating program. Please wait for running threads to terminate."); #quit message
         screen.refresh()  #Display last messages
         time.sleep(THREADKILLTIME); #Pause to allow thread to terminate        
         break;
+      elif s.startswith("request"):
+        reqFile = "";
+        reqFileHash = -1;
+
+        #Get file request parameter
+        try:
+          reqFile = s.split()[1];
+        except:
+          consolePrint (screen, "[STATUS]", "Invalid command parameters were provided. Provided command was: " + s);
+          continue;
+
+        #Ensure hash is valid
+        try:
+          reqFileHash = int(reqFile);
+      
+          # Check to see if integer is in valid range
+          if not (0 <= reqFileHash <= 9999) or len(reqFile) != 4:
+            raise ValueError('Invalid request file provided.') #throw exception
+        except:
+          consolePrint (screen, "[STATUS]", "Invalid file was requested. File name must be a 4 length numeral.");
+          continue;
+
+        #Check if this file is available at the next peer
+        fileStatus = checkFileAvailable(reqFileHash);
+
+        if fileStatus == FILECHECK.NOTAVAILABLE:
+          #Send request normally
+          sendFTMessage(reqFileHash, FT.REQ, myPeer, LOCALHOST, peerToPort(succ1));
+        elif fileStatus == FILECHECK.AVAILABLE:
+          #File is stored locally
+          consolePrint (screen, "[FILE RES]",   "File " + makeColComp(Colours.RED, reqFile) + " is stored locally.");
+          continue;
+        elif fileStatus == FILECHECK.NEXTAVAILABLE:
+          # The next peer has the file, send a special message
+          sendFTMessage(reqFileHash, FT.FORWARDNEXT, myPeer, LOCALHOST, peerToPort(succ1));
+
+        # Display file request sent message
+        consolePrint (screen, "[FILE REQ]",   "File request message for " + makeColComp(Colours.RED, reqFile) + " has been sent to successor Peer (" + makeColComp(Colours.GREEN, str(succ1)) + ").");
+
       # Unknown command
       else:
         consolePrint (screen, "[STATUS]", "Invalid command '" + s + "' provided.");
@@ -190,10 +239,6 @@ def prompt(screen, y, x, prompt=">> "):
 
 # By Johan Dahlin (http://stackoverflow.com/a/15274929/1800854)
 def terminate_thread(thread):
-    """Terminates a python thread from another thread.
-
-    :param thread: a threading.Thread instance
-    """
     if not thread.isAlive():
         return
 
@@ -243,12 +288,70 @@ def pingMonitor(screen, myPeer, myPort, succ1, succ2, Ping):
 
       # Check for ping request message
       if msgType == Ping.REQ:
-        consolePrint(screen, "[PING REQ]", "A ping request message was received from Peer " + makeColComp(Colours.GREEN, str(senderPeerID)));
+        consolePrint(screen, "[PING REQ]", "A ping request message was received from Peer (" + makeColComp(Colours.GREEN, str(senderPeerID)) + ")");
 
         #Send a ping response back (in response to ping request)
         sendPing(Ping.RES, myPeer, LOCALHOST, peerToPort(int(senderPeerID)));
       elif msgType == Ping.RES:
-        consolePrint(screen, "[PING RES]" , "A ping response message was received from Peer " + makeColComp(Colours.GREEN, str(senderPeerID)))
+        consolePrint(screen, "[PING RES]" , "A ping response message was received from Peer (" + makeColComp(Colours.GREEN, str(senderPeerID))+ ")")
+    except socket.error:
+      pass;
+
+
+# File Transfer Worker Thread
+def fileMonitor(screen, myPeer, myPort, succ1, succ2, Ping):
+  # Create socket that is to be used for listening for messages
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
+  sock.settimeout(FILEMONITOR_TIMEOUT);
+  sock.bind((LOCALHOST, myPort));
+  sock.listen(1);  
+
+  # Continuously monitor for file transfer requests
+  while True:
+    try:
+      conn, addr = sock.accept();
+
+      while True:
+        data = conn.recv(20);
+        if not data: break
+
+        msgType = ord(data[0]); # get message type
+        senderPeerID = int(data[1:4]); #get senders ID
+        filehash = data[4:]; # get file hash
+
+        #Predecessor peer has detected we have file, send response
+        if msgType == FT.FORWARDNEXT:
+          # We have the file
+          # Directory contact sender with response
+          sendFTMessage(str(filehash), FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
+          consolePrint(screen, "[FILE RES]", "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+
+        #We received a response for a requested file request
+        elif msgType == FT.RES:
+          consolePrint(screen, "[FILE RES]", "Received a response message from Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ", which has the file " + makeColComp(Colours.RED, str(filehash)) + ".");
+
+        #Else perform regular processing
+        else:
+          #Check if this file is available here
+          fileStatus = checkFileAvailable(str(filehash));
+
+          if fileStatus == FILECHECK.NOTAVAILABLE:
+            #Forward message to successor
+            sendFTMessage(str(filehash), FT.FORWARD, senderPeerID, LOCALHOST, peerToPort(succ1));
+            consolePrint(screen, "[FILE REQ]", "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+
+          elif fileStatus == FILECHECK.AVAILABLE:
+            # We have the file
+            # Directory contact sender with response
+            sendFTMessage(str(filehash), FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
+            consolePrint(screen, "[FILE RES]", "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+      
+          elif fileStatus == FILECHECK.NEXTAVAILABLE:
+            # The next peer has the file, send a special message
+            sendFTMessage(str(filehash), FT.FORWARDNEXT, senderPeerID, LOCALHOST, peerToPort(succ1));
+            consolePrint(screen, "[FILE REQ]", "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+
+      conn.close();
     except socket.error:
       pass;
 
@@ -256,7 +359,7 @@ def pingMonitor(screen, myPeer, myPort, succ1, succ2, Ping):
 # Ping Functions (UDP)
 # Sends a single ping to targetIP and targetPort using UDP
 # Message format is as follows:
-# Message Type - 0x00 for ping request
+# Message Type - 0x00 for ping request, 0x01 for ping response
 # Sender Identifier - must be sent as each client is also server (cant send ping over listening port).
 
 def sendPing(msgType, myID, targetIP, targetPort):
@@ -271,6 +374,50 @@ def sendPing(msgType, myID, targetIP, targetPort):
   sock.settimeout(PINGREQ_TIMEOUT);
   sock.sendto(message, (targetIP, targetPort));
 
+# File Transfer Messages (TCP)
+# Send or forward a file transfer message
+# Message Type - 0x00 for file request, 0x01 for forwarded message, 0x02 for file request response
+def sendFTMessage(filehash, msgType, sourceID, targetIP, targetPort):
+  #start with message type
+  message = bytearray([msgType]);
+
+  #append original senders peer identifier
+  message.extend(str(sourceID).zfill(3));
+
+  #append the file hash
+  message.extend(str(filehash).zfill(4));
+
+  #Send TCP message to target
+  try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
+    sock.connect((targetIP, targetPort));
+    sock.send(message);
+    sock.close();
+  except socket.error:
+    pass;
+
+#Checks if file is available here
+#Returns values to say if file should be forwarded, if file is available here 
+#or if file will be available at the next peer
+def checkFileAvailable(filehash):
+  hashedPeer = int(filehash) % (MAXPEERNUM + 1);
+
+  #Check if current peer holds file
+  if hashedPeer == myPeer:
+    return FILECHECK.AVAILABLE;
+
+  #Check special wrap around case
+  if succ1 < myPeer:
+    if myPeer < hashedPeer <= MAXPEERNUM or 0 <= hashedPeer <= succ1:
+      return FILECHECK.NEXTAVAILABLE;
+
+  #Check if succ will have file
+  if myPeer < hashedPeer <= succ1:
+    return FILECHECK.NEXTAVAILABLE;
+
+  #File must be forwarded
+  return FILECHECK.NOTAVAILABLE;
+
 # Convert peer ID to the port the peer will be using to listen for messages
 def peerToPort(peerID):
   return BASE_PORT_OFFSET + peerID;
@@ -282,8 +429,10 @@ def makeColComp(colour, text):
 # console print helper function
 def consolePrintLine (screen, pos, control, message):
   # Print different colours for different control messages
-  if (control == "[WARNING]"):
+  if control == "[WARNING]":
     screen.addstr(pos, 0, control, curses.color_pair(Colours.WARNING));
+  elif control == "[FILE REQ]" or control == "[FILE RES]":
+    screen.addstr(pos, 0, control, curses.color_pair(Colours.FILETRANSFER));
   else:
     screen.addstr(pos, 0, control, curses.color_pair(Colours.STATUS));
 
@@ -306,7 +455,7 @@ def consolePrintLine (screen, pos, control, message):
     else:
       str = line;
 
-    # Check to ensure we dont attempt to write offscreen
+    # Check to ensure we don't attempt to write offscreen
     height, width = screen.getmaxyx();
 
     if (totalOut + len(str) >= width):
