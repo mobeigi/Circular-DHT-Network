@@ -28,12 +28,13 @@ LOCALHOST = "127.0.0.1"
 BASE_PORT_OFFSET = 50000;
 PINGREQ_TIMEOUT = 1.0; # How long sent ping will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
-PINGBUFFER = 6;
+PINGBUFFER = 7;
 PINGSEND_FREQUENCY = 5.0; #How often to send a ping (seconds)
 FILEMONITOR_TIMEOUT = 1.0;
 THREADKILLTIME = 2.0; #How long to wait before terminating program (to allow thread to terminate)
 MAXPEERNUM = 255;
-INVALIDPEER = -1;
+
+SEQMAX = 1000;
 
 #Curses vars
 PRINTABLE = map(ord, printable)
@@ -47,7 +48,8 @@ def enum(**enums):
 # Enumns
 Ping = enum(REQ=0, RES=1);
 FT = enum(REQ=0, FORWARD=1, FORWARDNEXT=2, RES=3); #TCP Control codes
-PEERCHURN = enum(QUIT=4); #TCP Control codes
+PEER = enum(INVALID=-1, DEAD=-2);
+PEERCHURN = enum(QUIT=4, QUERYREQ=5, QUERYRES=6); #TCP Control codes
 FILECHECK = enum(NOTAVAILABLE=0, AVAILABLE=1, NEXTAVAILABLE = 2);
 Colours = enum(STATUS=1, WARNING=2, COMMAND=3, RED=4, GREEN=5, FILETRANSFER=6);
 
@@ -74,8 +76,8 @@ def init(argv):
   myPort = peerToPort(myPeer);
   succ1 = int(sys.argv[2]);
   succ2 = int(sys.argv[3]);
-  pred1 = INVALIDPEER;
-  pred2 = INVALIDPEER;
+  pred1 = PEER.INVALID;
+  pred2 = PEER.INVALID;
 
   curses.wrapper(main);
 
@@ -135,7 +137,8 @@ def main(screen):
       # Quit command
       if s == "quit":
         #This is a graceful exit, inform predecessors of exit
-        sendChurnMessage(succ1, succ2, myPeer, LOCALHOST, peerToPort(pred1), LOCALHOST, peerToPort(pred2));
+        sendChurnMessage(PEERCHURN.QUIT, succ1, succ2, myPeer, LOCALHOST, peerToPort(pred1));
+        sendChurnMessage(PEERCHURN.QUIT, succ1, succ2, myPeer, LOCALHOST, peerToPort(pred2));
 
         terminate_thread(tPingMonitor); #kill threads
         terminate_thread(tTCPMonitor);
@@ -268,7 +271,7 @@ def terminate_thread(thread):
 # Ping monitor worker thread
 def pingMonitor(screen, Ping):
 
-  global myPeer, myPort, succ1, succ2, pred1, pred2;
+  global myPeer, myPort, succ1, succ2, pred1, pred2, lastDeadPeer;
 
   # Create socket that is to be used for listening for messages
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM);
@@ -277,16 +280,57 @@ def pingMonitor(screen, Ping):
 
   lastPingsSent = 0;
 
+  #Sequence numbers (Go from 0-SEQMAX)
+  sequenceNum = 0;
+  succ1LastAck = 0;
+  succ2LastAck = 0;
+  succ1JustDied = False;
+  succ2JustDied = False;
+
   while True:
     # Send pings to successors at each PINGSENDTIME timestep
     if (time.time() - lastPingsSent) > PINGSEND_FREQUENCY:
-      # Send pings requests to each successor
-      sendPing(Ping.REQ, myPeer, LOCALHOST, peerToPort(succ1));
-      sendPing(Ping.REQ, myPeer, LOCALHOST, peerToPort(succ2));
+      # Send pings requests to each successor if they are not dead
+      if succ1 != PEER.DEAD:
+        sendPing(Ping.REQ, sequenceNum, myPeer, LOCALHOST, peerToPort(succ1));
+      if succ2 != PEER.DEAD:
+        sendPing(Ping.REQ, sequenceNum, myPeer, LOCALHOST, peerToPort(succ2));
+
+      sequenceNum = (sequenceNum + 1) % SEQMAX; #increment sequence number, wrapping to 0 if neccessary
 
       #Update lastPingsSent time
       lastPingsSent = time.time();
 
+    #If a peer was recently declared dead and we have a new peer
+    #Reset the sequence number so new peer is not instantly declared dead also
+    if succ1JustDied and succ1 != PEER.DEAD:
+      succ1LastAck = sequenceNum;
+      succ1JustDied = False;
+
+    if succ2JustDied and succ2 != PEER.DEAD:
+      succ2LastAck = sequenceNum;
+      succ2JustDied = False;
+
+    #Check to see successors are still alive
+    if succ1 != PEER.DEAD and sequenceNum - succ1LastAck >= 4:
+      #Send TCP query to 2nd successor asking for its successors
+      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ2));
+
+      consolePrint(screen, "[PEER CRN]", "Peer (" + makeColComp(Colours.GREEN, str(succ1)) + ") is no longer alive.")
+
+      lastDeadPeer = succ1;
+      succ1 = PEER.DEAD;
+      succ1JustDied = True;
+
+    if succ2 != PEER.DEAD and sequenceNum - succ2LastAck >= 4:
+      #Send TCP query to first successor, asking for its successors
+      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ1));
+
+      consolePrint(screen, "[PEER CRN]", "Peer (" + makeColComp(Colours.GREEN, str(succ2)) + ") is no longer alive.")
+      
+      lastDeadPeer = succ2;
+      succ2 = PEER.DEAD;
+      succ2JustDied = True;
 
     # Monitor myPort for incoming messages 
     #Get start time
@@ -298,7 +342,8 @@ def pingMonitor(screen, Ping):
       elapsed = time.time() - startTime;
       
       msgType = ord(data[0]); # get message type
-      senderPeerID = data[1:]; #rest of message is the senders ID
+      senderPeerID = int(data[1:4]); #get senders ID
+      recSeq = int(data[4:7]); #get ping sequence number
 
       # Check for ping request message
       if msgType == Ping.REQ:
@@ -306,22 +351,29 @@ def pingMonitor(screen, Ping):
 
         #If sender peer is unknown (reset all pred information) ONLY if we currently have both NON-INVALID peers
         #This forces pred peers to update seeminglessly if they change
-        if (pred1 != INVALIDPEER and pred2 != INVALIDPEER) and (senderPeerID != pred1 and senderPeerID != pred2):       
-          pred1 = INVALIDPEER;
-          pred2 = INVALIDPEER;
+        if (pred1 != PEER.INVALID and pred2 != PEER.INVALID) and (senderPeerID != pred1 and senderPeerID != pred2):       
+          pred1 = PEER.INVALID;
+          pred2 = PEER.INVALID;
 
         #If predecessors are invalid, update them
-        if pred1 == INVALIDPEER:
+        if pred1 == PEER.INVALID:
           pred1 = senderPeerID;
-        elif pred2 == INVALIDPEER:
+        elif pred2 == PEER.INVALID:
           #Ensure we don't add the same pred twice
           if senderPeerID != pred1:
             pred2 = senderPeerID;
 
         #Send a ping response back (in response to ping request)
-        sendPing(Ping.RES, myPeer, LOCALHOST, peerToPort(int(senderPeerID)));
+        sendPing(Ping.RES, recSeq, myPeer, LOCALHOST, peerToPort(int(senderPeerID)));
 
       elif msgType == Ping.RES:
+        #Update last received seq for peer
+        if senderPeerID == succ1:
+          succ1LastAck = recSeq;
+        elif senderPeerID == succ2:
+          succ2LastAck = recSeq;
+
+        #Print response received message
         consolePrint(screen, "[PING RES]" , "A ping response message was received from Peer (" + makeColComp(Colours.GREEN, str(senderPeerID))+ ")")
     except socket.error:
       pass;
@@ -330,7 +382,7 @@ def pingMonitor(screen, Ping):
 # TCP Worker Thread
 def TCPMonitor(screen, Ping):
 
-  global myPeer, myPort, succ1, succ2;
+  global myPeer, myPort, succ1, succ2, lastDeadPeer;
 
   # Create socket that is to be used for listening for messages
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
@@ -372,6 +424,31 @@ def TCPMonitor(screen, Ping):
           consolePrint(screen, "[PEER CRN]", "My first successor is now Peer (" + makeColComp(Colours.GREEN, str(succ1))  + ").");
           consolePrint(screen, "[PEER CRN]", "My second successor is now Peer (" + makeColComp(Colours.GREEN, str(succ2))  + ").");
 
+        # A peer has asked for successor information        
+        elif msgType == PEERCHURN.QUERYREQ:
+          #Send response message to sender
+          sendChurnMessage(PEERCHURN.QUERYRES, succ1, succ2, myPeer, LOCALHOST, peerToPort(senderPeerID));
+
+        # A peer has responded with query information
+        elif msgType == PEERCHURN.QUERYRES:
+          #Get required peers
+          nextPeerSucc1 = int(data[4:7]); #succ1
+          nextPeerSucc2 = int(data[7:10]); #succ2
+
+          #Update successors
+          if succ1 == PEER.DEAD:
+            succ1 = succ2; #succ2 is our new succ1
+            succ2 = nextPeerSucc1; #our successors 1st successor is clearly our new 2nd successor
+          elif succ2 == PEER.DEAD:
+            if nextPeerSucc1 == lastDeadPeer: # In this case, next peer has not replaced dead peer yet, so its second successor is our new second succ
+              succ2 = nextPeerSucc2;
+            else: #Otherwise, peer has replaced the dead peer, its first successor is our new second successor
+              succ2 = nextPeerSucc1;
+
+          #Print change statuses
+          consolePrint(screen, "[PEER CRN]", "My first successor is now Peer (" + makeColComp(Colours.GREEN, str(succ1))  + ").");
+          consolePrint(screen, "[PEER CRN]", "My second successor is now Peer (" + makeColComp(Colours.GREEN, str(succ2))  + ").");
+
         else:
           #File transfer message
           filehash = data[4:]; # get file hash
@@ -381,7 +458,7 @@ def TCPMonitor(screen, Ping):
             # We have the file
             # Directory contact sender with response
             sendFTMessage(str(filehash), FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
-            consolePrint(screen, "[FILE RES]", "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+            consolePrint(screen, "[FILE RES]", "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ".");
 
           #We received a response for a requested file request
           elif msgType == FT.RES:
@@ -419,13 +496,16 @@ def TCPMonitor(screen, Ping):
 # Message Type - 0x00 for ping request, 0x01 for ping response
 # Sender Identifier - must be sent as each client is also server (cant send ping over listening port).
 
-def sendPing(msgType, myID, targetIP, targetPort):
+def sendPing(msgType, seqNum, myID, targetIP, targetPort):
   #start with default ping request message
   message = bytearray([msgType]);
   
   #append senders peer identifier
-  message.extend(str(myID));
+  message.extend(str(myID).zfill(3));
   
+  #append sequence number
+  message.extend(str(seqNum).zfill(3));
+
   #Send UDP datagram
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); #UDP
   sock.settimeout(PINGREQ_TIMEOUT);
@@ -455,10 +535,10 @@ def sendFTMessage(filehash, msgType, sourceID, targetIP, targetPort):
 
 
 # Peer Churn Graceful Exit Message (TCP)
-# Send a message to predecessors informing them of exit
-def sendChurnMessage(succ1, succ2, sourceID, targetIP1, targetPort1, targetIP2, targetPort2):
+# Send a message to predecessors informing them of exit or querying for information
+def sendChurnMessage(msgType, succ1, succ2, sourceID, targetIP, targetPort):
   #start with message type
-  message = bytearray([PEERCHURN.QUIT]);
+  message = bytearray([msgType]);
 
   #append original senders peer identifier
   message.extend(str(sourceID).zfill(3));
@@ -469,17 +549,10 @@ def sendChurnMessage(succ1, succ2, sourceID, targetIP1, targetPort1, targetIP2, 
   #append succ2 indentifier
   message.extend(str(succ2).zfill(3));
 
-  #Send TCP message to targets
+  #Send TCP message to target
   try:
-    #Predeccessor 1
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
-    sock.connect((targetIP1, targetPort1));
-    sock.send(message);
-    sock.close();
-
-    #Predeccessor 2
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
-    sock.connect((targetIP2, targetPort2));
+    sock.connect((targetIP, targetPort));
     sock.send(message);
     sock.close();
   except socket.error:
