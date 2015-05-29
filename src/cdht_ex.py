@@ -18,29 +18,31 @@ import socket
 import time
 import threading
 import ctypes
+import struct
 
-import curses;
+import curses
+import curses.ascii
 from string import printable
 
 
 #Definitions
 LOCALHOST = "127.0.0.1" #for demonstration purposes
-BASE_PORT_OFFSET = 50000; #Port offset for connections. All monitoring occurs on BASE_PORT_OFFSET + i port where i is the peer ID
+BASE_PORT_OFFSET = 62100; #Port offset for connections. All monitoring occurs on BASE_PORT_OFFSET + i port where i is the peer ID
 PINGREQ_TIMEOUT = 1.0; # How long until sent ping over UDP will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
-PINGBUFFER = 7; #How much buffer space in bytes required to encapsulate a ping message
-TCPBUFFER = 10; #How much buffer space in bytes to allocate to incoming TCP messages (should be low for performance reasons)
+PINGBUFFER = 4; #How much buffer space in bytes required to encapsulate a ping message
+TCPBUFFER = 4; #How much buffer space in bytes to allocate to incoming TCP messages (should be low for performance reasons)
 PINGSEND_FREQUENCY = 5.0; #How often to send a ping (seconds)
 FILEMONITOR_TIMEOUT = 1.0;  #How long to wait before terminating a TCP file transfer connection (handshaking stage)
 THREADKILLTIME = 2.0; #How long to wait before terminating program (to allow thread to terminate safely)
 MAXPEERNUM = 255; #Maximum number of peers in CDHT network
-SEQMAX = 1000; #Maximum sequence number (max not inclusive). Ie possible sequence numbers range from 0 - SEQMAX
-PING_MISSED_ACK_DEAD_NUM = 4; #Number of consective acks that are required for a peer to be declared as dead
+SEQMAX = 65536; #Maximum sequence number (non inclusive). ie possible sequence numbers range from 0 - SEQMAX
+PING_MISSED_ACK_DEAD_NUM = 4; #Number of consecutive acks that are required for a peer to be declared as dead
 
 #Curses vars
 PRINTABLE = map(ord, printable)
 COLOR_DEFAULT = -1;
-MIN_REC_WIDTH = 110; #Minimum width required to show longest line of output
+MIN_REC_WIDTH = 111; #Minimum width required to show longest line of output
 
 # Enumeration type definition
 # By SO community, From: http://stackoverflow.com/a/1695250/1800854
@@ -150,43 +152,43 @@ def main(screen):
         time.sleep(THREADKILLTIME); #Pause to allow thread to terminate        
         break;
       elif s.startswith("request"):
-        reqFile = "";
-        reqFileHash = -1;
+        reqFileHash = "";
+        reqFileHashNum = -1;
 
         #Get file request parameter
         try:
-          reqFile = s.split()[1];
+          reqFileHash = s.split()[1];
         except:
           consolePrint (screen, CONTROL.STATUS, "Invalid command parameters were provided. Provided command was: " + s);
           continue;
 
         #Ensure hash is valid
         try:
-          reqFileHash = int(reqFile);
+          reqFileHashNum = int(reqFileHash);
       
           # Check to see if integer is in valid range
-          if not (0 <= reqFileHash <= 9999) or len(reqFile) != 4:
+          if not (0 <= reqFileHashNum <= 9999) or len(reqFileHash) != 4:
             raise ValueError('Invalid request file provided.') #throw exception
         except:
           consolePrint (screen, CONTROL.STATUS, "Invalid file was requested. File name must be a 4 length numeral.");
           continue;
 
         #Check if this file is available at the next peer
-        fileStatus = checkFileAvailable(reqFileHash);
+        fileStatus = checkFileAvailable(reqFileHashNum);
 
         if fileStatus == FILECHECK.NOTAVAILABLE:
           #Send request normally
-          sendFTMessage(reqFileHash, FT.REQ, myPeer, LOCALHOST, peerToPort(succ1));
+          sendFTMessage(reqFileHashNum, FT.REQ, myPeer, LOCALHOST, peerToPort(succ1));
         elif fileStatus == FILECHECK.AVAILABLE:
           #File is stored locally
-          consolePrint (screen, CONTROL.FTRES,   "File " + makeColComp(Colours.RED, reqFile) + " is stored locally.");
+          consolePrint (screen, CONTROL.FTRES,   "File " + makeColComp(Colours.RED, reqFileHash) + " is stored locally.");
           continue;
         elif fileStatus == FILECHECK.NEXTAVAILABLE:
           # The next peer has the file, send a special message
-          sendFTMessage(reqFileHash, FT.FORWARDNEXT, myPeer, LOCALHOST, peerToPort(succ1));
+          sendFTMessage(reqFileHashNum, FT.FORWARDNEXT, myPeer, LOCALHOST, peerToPort(succ1));
 
         # Display file request sent message
-        consolePrint (screen, CONTROL.FTREQ,   "File request message for " + makeColComp(Colours.RED, reqFile) + " has been sent to successor Peer (" + makeColComp(Colours.GREEN, str(succ1)) + ").");
+        consolePrint (screen, CONTROL.FTREQ,   "File request message for " + makeColComp(Colours.RED, reqFileHash) + " has been sent to successor Peer (" + makeColComp(Colours.GREEN, str(succ1)) + ").");
 
       elif s.startswith("ping"):
         command = "";
@@ -246,8 +248,8 @@ def input(screen):
 
     while True:
         c = screen.getch();
-
-        if c in (13, 10):
+        
+        if c in (curses.ascii.LF, curses.ascii.CR, curses.KEY_ENTER): #accept KEY_ENTER, LF or CR for compatibility
             break;
         elif c == ERASE or c == curses.KEY_BACKSPACE: #Both erase and KEY_BACKSPACE used for compatibility
             y, x = screen.getyx();
@@ -378,8 +380,8 @@ def pingMonitor(screen, Ping):
       data, addr = sock.recvfrom(PINGBUFFER);
       
       msgType = ord(data[0]); # get message type
-      senderPeerID = int(data[1:4]); #get senders ID
-      recSeq = int(data[4:7]); #get ping sequence number
+      senderPeerID = int(struct.unpack("B", data[1])[0]); #get senders ID
+      recSeq = int(struct.unpack("H", data[2:4])[0]); #get ping sequence number
 
       # Check for ping request message
       if msgType == Ping.REQ:
@@ -436,13 +438,13 @@ def TCPMonitor(screen, Ping):
         if not data: break
 
         msgType = ord(data[0]); # get message type
-        senderPeerID = int(data[1:4]); #get senders ID
+        senderPeerID = int(struct.unpack("B", data[1])[0]); #get senders ID
         
         # Check TCP message type
         if msgType == PEERCHURN.QUIT:
           #Get quitting peers successors
-          quittingPeerSucc1 = int(data[4:7]); #succ1
-          quittingPeerSucc2 = int(data[7:10]); #succ2
+          quittingPeerSucc1 = int(struct.unpack("B", data[2])[0]); #succ1
+          quittingPeerSucc2 = int(struct.unpack("B", data[3])[0]); #succ2
 
           #Peer quit message, a successor is quitting, update successors
           if senderPeerID == succ1:
@@ -468,8 +470,8 @@ def TCPMonitor(screen, Ping):
         # A peer has responded with query information
         elif msgType == PEERCHURN.QUERYRES:
           #Get required peers
-          nextPeerSucc1 = int(data[4:7]); #succ1
-          nextPeerSucc2 = int(data[7:10]); #succ2
+          nextPeerSucc1 = int(struct.unpack("B", data[2])[0]); #succ1
+          nextPeerSucc2 = int(struct.unpack("B", data[3])[0]); #succ2
 
           #Update successors
           if succ1 == PEER.DEAD:
@@ -487,13 +489,13 @@ def TCPMonitor(screen, Ping):
 
         else:
           #File transfer message
-          filehash = data[4:]; # get file hash
+          filehash = int(struct.unpack("H", data[2:4])[0]); # get file hash
 
           #Predecessor peer has detected we have file, send response
           if msgType == FT.FORWARDNEXT:
             # We have the file
             # Directory contact sender with response
-            sendFTMessage(str(filehash), FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
+            sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
             consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ".");
 
           #We received a response for a requested file request
@@ -507,18 +509,18 @@ def TCPMonitor(screen, Ping):
 
             if fileStatus == FILECHECK.NOTAVAILABLE:
               #Forward message to successor
-              sendFTMessage(str(filehash), FT.FORWARD, senderPeerID, LOCALHOST, peerToPort(succ1));
+              sendFTMessage(filehash, FT.FORWARD, senderPeerID, LOCALHOST, peerToPort(succ1));
               consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
 
             elif fileStatus == FILECHECK.AVAILABLE:
               # We have the file
               # Directory contact sender with response
-              sendFTMessage(str(filehash), FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
+              sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
               consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
         
             elif fileStatus == FILECHECK.NEXTAVAILABLE:
               # The next peer has the file, send a special message
-              sendFTMessage(str(filehash), FT.FORWARDNEXT, senderPeerID, LOCALHOST, peerToPort(succ1));
+              sendFTMessage(filehash, FT.FORWARDNEXT, senderPeerID, LOCALHOST, peerToPort(succ1));
               consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
 
       conn.close();
@@ -538,10 +540,10 @@ def sendPing(msgType, seqNum, myID, targetIP, targetPort):
   message = bytearray([msgType]);
   
   #append senders peer identifier
-  message.extend(str(myID).zfill(3));
-  
+  message.extend( struct.pack("B", myID)); #byte
+
   #append sequence number
-  message.extend(str(seqNum).zfill(3));
+  message.extend( struct.pack("H", seqNum));  #unsigned short
 
   #Send UDP datagram
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); #UDP
@@ -558,10 +560,10 @@ def sendFTMessage(filehash, msgType, sourceID, targetIP, targetPort):
   message = bytearray([msgType]);
 
   #append original senders peer identifier
-  message.extend(str(sourceID).zfill(3));
+  message.extend( struct.pack("B", sourceID));
 
   #append the file hash
-  message.extend(str(filehash).zfill(4));
+  message.extend( struct.pack("H", filehash));
 
   #Send TCP message to target
   try:
@@ -580,13 +582,13 @@ def sendChurnMessage(msgType, succ1, succ2, sourceID, targetIP, targetPort):
   message = bytearray([msgType]);
 
   #append original senders peer identifier
-  message.extend(str(sourceID).zfill(3));
+  message.extend( struct.pack("B", sourceID));
 
   #append succ1 indentifier
-  message.extend(str(succ1).zfill(3));
+  message.extend( struct.pack("B", succ1));
 
   #append succ2 indentifier
-  message.extend(str(succ2).zfill(3));
+  message.extend( struct.pack("B", succ2));
 
   #Send TCP message to target
   try:
