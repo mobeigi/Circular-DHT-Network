@@ -31,12 +31,12 @@ BASE_PORT_OFFSET = 50000; #Port offset for connections. All monitoring occurs on
 PINGREQ_TIMEOUT = 1.0; # How long until sent ping over UDP will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
 PINGBUFFER = 4; #How much buffer space in bytes required to encapsulate a ping message
-TCPBUFFER = 4; #How much buffer space in bytes to allocate to incoming TCP messages (should be low for performance reasons)
+TCPBUFFER = 6; #How much buffer space in bytes to allocate to incoming TCP messages
 PINGSEND_FREQUENCY = 5.0; #How often to send a ping (seconds)
 FILEMONITOR_TIMEOUT = 1.0;  #How long to wait before terminating a TCP file transfer connection (handshaking stage)
 THREADKILLTIME = 2.0; #How long to wait before terminating program (to allow thread to terminate safely)
 MAXPEERNUM = 255; #Maximum number of peers in CDHT network
-SEQMAX = 65536; #Maximum sequence number (non inclusive). ie possible sequence numbers range from 0 - SEQMAX
+SEQMAX = 65536; #Maximum sequence number (non inclusive). ie possible sequence numbers range from 0 - (SEQMAX - 1) before wrapping around to zero
 PING_MISSED_ACK_DEAD_NUM = 4; #Number of consecutive acks that are required for a peer to be declared as dead
 
 #Curses vars
@@ -444,8 +444,8 @@ def TCPMonitor(screen, Ping):
         # Check TCP message type
         if msgType == PEERCHURN.QUIT:
           #Get quitting peers successors
-          quittingPeerSucc1 = int(struct.unpack("B", data[2])[0]); #succ1
-          quittingPeerSucc2 = int(struct.unpack("B", data[3])[0]); #succ2
+          quittingPeerSucc1 = int(struct.unpack("h", data[2:4])[0]); #succ1
+          quittingPeerSucc2 = int(struct.unpack("h", data[4:6])[0]); #succ2
 
           #Peer quit message, a successor is quitting, update successors
           if senderPeerID == succ1:
@@ -471,15 +471,17 @@ def TCPMonitor(screen, Ping):
         # A peer has responded with query information
         elif msgType == PEERCHURN.QUERYRES:
           #Get required peers
-          nextPeerSucc1 = int(struct.unpack("B", data[2])[0]); #succ1
-          nextPeerSucc2 = int(struct.unpack("B", data[3])[0]); #succ2
+          nextPeerSucc1 = int(struct.unpack("h", data[2:4])[0]); #succ1
+          nextPeerSucc2 = int(struct.unpack("h", data[4:6])[0]); #succ2
 
           #Update successors
           if succ1 == PEER.DEAD:
             succ1 = succ2; #succ2 is our new succ1
             succ2 = nextPeerSucc1; #our successors 1st successor is clearly our new 2nd successor
           elif succ2 == PEER.DEAD:
-            if nextPeerSucc1 == lastDeadPeer: # In this case, next peer has not replaced dead peer yet, so its second successor is our new second succ
+            # In this case, next peer has not detected dead peer yet or points to dead peer but has not updated its successors
+            # So its current second successor is our new second successor
+            if nextPeerSucc1 == lastDeadPeer or nextPeerSucc1 == PEER.DEAD:
               succ2 = nextPeerSucc2;
             else: #Otherwise, peer has replaced the dead peer, its first successor is our new second successor
               succ2 = nextPeerSucc1;
@@ -497,11 +499,11 @@ def TCPMonitor(screen, Ping):
             # We have the file
             # Directory contact sender with response
             sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
-            consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ".");
+            consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ".");
 
           #We received a response for a requested file request
           elif msgType == FT.RES:
-            consolePrint(screen, CONTROL.FTRES, "Received a response message from Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ", which has the file " + makeColComp(Colours.RED, str(filehash)) + ".");
+            consolePrint(screen, CONTROL.FTRES, "Received a response message from Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ", which has the file " + makeColComp(Colours.RED, str(filehash).zfill(4)) + ".");
 
           #Else perform regular processing
           else:
@@ -511,18 +513,18 @@ def TCPMonitor(screen, Ping):
             if fileStatus == FILECHECK.NOTAVAILABLE:
               #Forward message to successor
               sendFTMessage(filehash, FT.FORWARD, senderPeerID, LOCALHOST, peerToPort(succ1));
-              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
 
             elif fileStatus == FILECHECK.AVAILABLE:
               # We have the file
               # Directory contact sender with response
               sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
-              consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
         
             elif fileStatus == FILECHECK.NEXTAVAILABLE:
               # The next peer has the file, send a special message
               sendFTMessage(filehash, FT.FORWARDNEXT, senderPeerID, LOCALHOST, peerToPort(succ1));
-              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
 
       conn.close();
     except socket.error:
@@ -536,12 +538,12 @@ def TCPMonitor(screen, Ping):
 # Sender Identifier - must be sent as each client is also server (cant send ping over listening port).
 # Sequence Number - is sent so detection of dead peers is possible
 
-def sendPing(msgType, seqNum, myID, targetIP, targetPort):
+def sendPing(msgType, seqNum, sourceID, targetIP, targetPort):
   #start with default ping request message
   message = bytearray([msgType]);
   
   #append senders peer identifier
-  message.extend( struct.pack("B", myID)); #byte
+  message.extend( struct.pack("B", sourceID)); #byte
 
   #append sequence number
   message.extend( struct.pack("H", seqNum));  #unsigned short
@@ -561,10 +563,10 @@ def sendFTMessage(filehash, msgType, sourceID, targetIP, targetPort):
   message = bytearray([msgType]);
 
   #append original senders peer identifier
-  message.extend( struct.pack("B", sourceID));
+  message.extend( struct.pack("B", sourceID));  #byte
 
   #append the file hash
-  message.extend( struct.pack("H", filehash));
+  message.extend( struct.pack("H", filehash));  #unsigned short
 
   #Send TCP message to target
   try:
@@ -583,13 +585,13 @@ def sendChurnMessage(msgType, succ1, succ2, sourceID, targetIP, targetPort):
   message = bytearray([msgType]);
 
   #append original senders peer identifier
-  message.extend( struct.pack("B", sourceID));
+  message.extend( struct.pack("B", sourceID));  #byte
 
   #append succ1 indentifier
-  message.extend( struct.pack("B", succ1));
+  message.extend( struct.pack("h", succ1)); #signed short
 
   #append succ2 indentifier
-  message.extend( struct.pack("B", succ2));
+  message.extend( struct.pack("h", succ2)); #signed short
 
   #Send TCP message to target
   try:
