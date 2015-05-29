@@ -450,7 +450,7 @@ def TCPMonitor(screen, Ping):
 
           #Peer quit message, a successor is quitting, update successors
           if senderPeerID == succ1:
-            #If quitting peer is immediate succesor, simply inheirt their successors
+            #If quitting peer is immediate successor, simply inherit their successors
             succ1 = quittingPeerSucc1;
             succ2 = quittingPeerSucc2;
 
@@ -698,7 +698,7 @@ def consolePrintLine (screen, pos, control, message):
 # Prints a control message and info message to the given screen
 def consolePrint (screen, control, message):
 
-  #Check if print should be ommited
+  #Check if print should be omitted
   if (not showPingMessages) and (control == CONTROL.PINGREQ or control == CONTROL.PINGRES):
     return;
 
