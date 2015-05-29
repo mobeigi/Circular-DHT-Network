@@ -357,24 +357,25 @@ def pingMonitor(screen, Ping):
     #Check to see successors are still alive
     if succ1 != PEER.DEAD and succ1NumMissedAcks >= PING_MISSED_ACK_DEAD_NUM:
 
-      #Send TCP query to 2nd successor asking for its successors
-      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ2));
-
       consolePrint(screen, CONTROL.PEERCHURN, "Peer (" + makeColComp(Colours.GREEN, str(succ1)) + ") is no longer alive.")
 
       lastDeadPeer = succ1;
       succ1 = PEER.DEAD;
       succ1JustDied = True;
 
+      #Send TCP query to 2nd successor asking for its successors
+      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ2));
+
     if succ2 != PEER.DEAD and succ2NumMissedAcks >= PING_MISSED_ACK_DEAD_NUM:
-      #Send TCP query to first successor, asking for its successors
-      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ1));
 
       consolePrint(screen, CONTROL.PEERCHURN, "Peer (" + makeColComp(Colours.GREEN, str(succ2)) + ") is no longer alive.")
       
       lastDeadPeer = succ2;
       succ2 = PEER.DEAD;
       succ2JustDied = True;
+
+      #Send TCP query to first successor, asking for its successors
+      sendChurnMessage(PEERCHURN.QUERYREQ, 0, 0, myPeer, LOCALHOST, peerToPort(succ1));
 
     # Monitor listen port for incoming ping messages
     try:
@@ -499,11 +500,11 @@ def TCPMonitor(screen, Ping):
             # We have the file
             # Directory contact sender with response
             sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
-            consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ".");
+            consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer (" + makeColComp(Colours.GREEN, str(senderPeerID))  + ").");
 
           #We received a response for a requested file request
           elif msgType == FT.RES:
-            consolePrint(screen, CONTROL.FTRES, "Received a response message from Peer " + makeColComp(Colours.GREEN, str(senderPeerID))  + ", which has the file " + makeColComp(Colours.RED, str(filehash).zfill(4)) + ".");
+            consolePrint(screen, CONTROL.FTRES, "Received a response message from Peer (" + makeColComp(Colours.GREEN, str(senderPeerID))  + "), which has the file " + makeColComp(Colours.RED, str(filehash).zfill(4)) + ".");
 
           #Else perform regular processing
           else:
@@ -513,18 +514,18 @@ def TCPMonitor(screen, Ping):
             if fileStatus == FILECHECK.NOTAVAILABLE:
               #Forward message to successor
               sendFTMessage(filehash, FT.FORWARD, senderPeerID, LOCALHOST, peerToPort(succ1));
-              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer (" + makeColComp(Colours.GREEN, str(succ1))  + ").");
 
             elif fileStatus == FILECHECK.AVAILABLE:
               # We have the file
               # Directory contact sender with response
               sendFTMessage(filehash, FT.RES, myPeer, LOCALHOST, peerToPort(senderPeerID));
-              consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTRES, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is stored here. A response message has been sent to Peer (" + makeColComp(Colours.GREEN, str(succ1))  + ").");
         
             elif fileStatus == FILECHECK.NEXTAVAILABLE:
               # The next peer has the file, send a special message
               sendFTMessage(filehash, FT.FORWARDNEXT, senderPeerID, LOCALHOST, peerToPort(succ1));
-              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer " + makeColComp(Colours.GREEN, str(succ1))  + ".");
+              consolePrint(screen, CONTROL.FTREQ, "File " + makeColComp(Colours.RED, str(filehash).zfill(4)) + " is not stored here. File request message has been forwarded to successor Peer (" + makeColComp(Colours.GREEN, str(succ1))  + ").");
 
       conn.close();
     except socket.error:
