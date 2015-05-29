@@ -27,7 +27,7 @@ from string import printable
 
 #Definitions
 LOCALHOST = "127.0.0.1" #for demonstration purposes
-BASE_PORT_OFFSET = 62100; #Port offset for connections. All monitoring occurs on BASE_PORT_OFFSET + i port where i is the peer ID
+BASE_PORT_OFFSET = 50000; #Port offset for connections. All monitoring occurs on BASE_PORT_OFFSET + i port where i is the peer ID
 PINGREQ_TIMEOUT = 1.0; # How long until sent ping over UDP will timeout
 PINGMONITOR_TIMEOUT = 1.0; #How long to wait for a ping response to come in
 PINGBUFFER = 4; #How much buffer space in bytes required to encapsulate a ping message
@@ -40,6 +40,7 @@ SEQMAX = 65536; #Maximum sequence number (non inclusive). ie possible sequence n
 PING_MISSED_ACK_DEAD_NUM = 4; #Number of consecutive acks that are required for a peer to be declared as dead
 
 #Curses vars
+CONTROL_WIDTH = 12;
 PRINTABLE = map(ord, printable)
 COLOR_DEFAULT = -1;
 MIN_REC_WIDTH = 111; #Minimum width required to show longest line of output
@@ -652,7 +653,7 @@ def consolePrintLine (screen, pos, control, message):
   # Split messages based on colour components
   newMes = re.split("(colour\d\[.*?\])", message);
 
-  totalOut = 12; # first column offset
+  totalOut = CONTROL_WIDTH; # first column offset
 
   for line in newMes:
 
