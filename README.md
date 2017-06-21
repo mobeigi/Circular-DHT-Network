@@ -12,6 +12,7 @@ Refer to **doc/report.pdf** for further documentation.
 Images
 ----
 <h4>Curses screen of Peer 50 in CDHT network:</h4>
+
 ![Peer 50 Terminal](/../screenshots/screenshots/peerinstance.png?raw=true "Peer 50 Terminal")
 
 License
